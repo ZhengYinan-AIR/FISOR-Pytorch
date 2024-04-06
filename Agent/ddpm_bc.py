@@ -370,13 +370,13 @@ class FISOR_Agent(IDQL_Agent):
               return torch.mean(weight * (diff**2))
        
 
-       def policy_loss(self, s, a, x0, cond=None):
-
+       def policy_loss(self, x0, cond=None):
+              # action: x0, state: cond
               with torch.no_grad():
-                     qh = torch.cat(self.qh_models_target(s, a), axis=1).max(axis=1, keepdim=True)[0]
-                     vh = self.vh_model(s)
-                     q = torch.cat(self.q_models_target(s, a), axis=1).min(axis=1, keepdim=True)[0]
-                     v = self.v_model(s)
+                     qh = torch.cat(self.qh_models_target(cond, x0), axis=1).max(axis=1, keepdim=True)[0]
+                     vh = self.vh_model(cond)
+                     q = torch.cat(self.q_models_target(cond, x0), axis=1).min(axis=1, keepdim=True)[0]
+                     v = self.v_model(cond)
 
                      unsafe_condition = torch.where(vh > 0, 1, 0)
                      safe_condition = torch.where(vh <= 0, 1, 0) * torch.where(qh <= 0, 1, 0)
