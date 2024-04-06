@@ -306,8 +306,106 @@ class IDQL_Agent(BaseAgent):
               return action
               
               
-              
+class FISOR_Agent(IDQL_Agent):
+       def __init__(
+              self, 
+              policy_model: torch.nn.Module,
+              v_model: torch.nn.Module, 
+              q_models: torch.nn.Module,
+              vh_model: torch.nn.Module,
+              qh_models: torch.nn.Module,
+              schedule: str='vp', 
+              num_timesteps: int=5,
+              num_sample: int=16,
+              gamma: float=0.99,
+              expectile: float=0.9,
+              reverse_expectile: float=0.9,
+              cost_temp = 5,
+              reward_temp = 3,
+              cost_ub = 150,
+              reward_ub = 100,
+       ):       
+              super().__init__(
+                     policy_model,
+                     v_model,
+                     q_models,
+                     schedule=schedule,
+                     gamma=gamma,
+                     num_timesteps=num_timesteps,
+                     num_sample=num_sample,
+                     expectile=expectile,
+              )
+              self.vh_model = vh_model
+              self.qh_models = qh_models
+              self.qh_models_target = copy.deepcopy(qh_models)
+              self.reverse_expectile = reverse_expectile
+              self.cost_temp = cost_temp
+              self.reward_temp = reward_temp
+              self.cost_ub = cost_ub
+              self.reward_ub = reward_ub
 
+       def qh_loss(self, s, a, h, next_s, d):
+              with torch.no_grad():
+                     target_qh_nonterminal = (1. - self.gamma) * h + self.gamma * torch.maximum(h, self.vh_model(next_s))
+                     target_qh = target_qh_nonterminal * (1 - d) + h * d
+              
+              qhs = self.qh_models(s, a)
+              
+              loss = [F.mse_loss(qh, target_qh) for qh in qhs]
+              loss = sum(loss) / len(loss)
+              return loss
+       
+       
+       def v_loss(self, s, a):
+              with torch.no_grad():
+                     target_vh = torch.cat(self.qh_models_target(s, a), axis=1).max(axis=1, keepdim=True)[0]
+              
+              vh = self.vh_model(s)
+              loss = self.reverse_expectile_loss(target_vh - vh)
+              return loss, vh.mean()
+       
+
+       def reverse_expectile_loss(self, diff):
+              weight = torch.where(diff < 0, self.reverse_expectile, (1 - self.reverse_expectile))
+              return torch.mean(weight * (diff**2))
+       
+
+       def policy_loss(self, s, a, x0, cond=None):
+
+              with torch.no_grad():
+                     qh = torch.cat(self.qh_models_target(s, a), axis=1).max(axis=1, keepdim=True)[0]
+                     vh = self.vh_model(s)
+                     q = torch.cat(self.q_models_target(s, a), axis=1).min(axis=1, keepdim=True)[0]
+                     v = self.v_model(s)
+
+                     unsafe_condition = torch.where(vh > 0, 1, 0)
+                     safe_condition = torch.where(vh <= 0, 1, 0) * torch.where(qh <= 0, 1, 0)
+
+
+                     cost_exp_adv = torch.exp((vh-qh) * self.cost_temp)
+                     reward_exp_adv = torch.exp((q - v) * self.reward_temp)
+                     
+                     unsafe_weights = unsafe_condition * torch.clip(cost_exp_adv, 0, self.cost_ub) ## ignore vc >0, qc>vc
+                     safe_weights = safe_condition * torch.clip(reward_exp_adv, 0, self.reward_ub)
+                     
+                     weights = unsafe_weights + safe_weights
+              loss = weights * self.policy.policy_loss(x0, cond)
+              return loss
+       
+       @torch.no_grad()
+       def get_action(self, state, from_target=True):
+              if from_target:
+                     actions = self.policy_target.get_action(state, self.num_sample, clip_sample=True)
+              else:
+                     actions = self.policy.get_action(state, self.num_sample, clip_sample=True)
+              
+              state = state.repeat(actions.shape[0], 1)
+              qh = torch.cat(self.qh_models_target(state, actions), axis=1).max(axis=1)[0]
+              idx = torch.argmin(qh)
+              
+              action = actions[idx]
+              return action
+              
 if __name__ == '__main__':
        timesteps = 100
        schedule = SCHEDULE['linear']
